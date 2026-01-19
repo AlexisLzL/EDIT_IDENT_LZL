@@ -36,7 +36,7 @@ export const initialIneData: IneData = {
   vigencia: "2023-2033",
   sexo: "H",
   firma: "",
-  ocr: "<<0747016710988 <<0900400018007501M100<<",
+  ocr: "IDMEX2620530367<<0250106457695\n9803053H3312315MEX<03<<06440<7\nSANMIGUEL<AGUILAR<<GERARDO<<<<",
   cic: "145689723",
   identificador: "1234567890",
   huella: "",

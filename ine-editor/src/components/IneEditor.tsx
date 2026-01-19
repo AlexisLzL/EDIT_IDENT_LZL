@@ -11,7 +11,7 @@ import { Download, Upload, Move, Check, Paintbrush, FileImage, RotateCcw, Settin
 
 // Default template paths
 const FRONT_TEMPLATE = "/ine-front.png";
-const BACK_TEMPLATE = "/ine-back.png";
+const BACK_TEMPLATE = "/ine-back-custom-v3.png";
 
 interface Position {
   x: number;
@@ -181,11 +181,8 @@ const makePrintedPhoto = (
   const ctx = out.getContext("2d", { willReadFrequently: true });
   if (!ctx) return source;
 
-  if (opts.variant === "small") {
-    ctx.fillStyle = "rgb(224,224,224)";
-    ctx.fillRect(0, 0, w, h);
-  }
-
+  // REMOVED: Forced white background fill to allow transparency
+  
   // 1. Initial soften
   const softenScale = opts.variant === "small" ? 0.55 : 0.8;
   const tmp = document.createElement("canvas");
@@ -207,12 +204,19 @@ const makePrintedPhoto = (
 
   // 2. Halftone effect for small ghost photo
   if (opts.variant === "small") {
-    // Ghost photo with COLOR, but faded and textured
-    const desat = 0.3; // Slight desaturation, not monochrome
-    const contrast = 1.1;
-    const brightness = 15;
+    // Ghost Photo Processing:
+    // 1. Keep full background (Rectangular photo)
+    // 2. Enhance color (Vivid) and apply noise
+    
+    const contrast = 1.15; 
+    const brightness = 15; 
+    const noiseAmp = 40; 
     
     const applyContrast = (v: number) => (v - 128) * contrast + 128;
+
+    // We will build a new Alpha channel based on Luma (Background Removal)
+    const imgAlpha = ctx.createImageData(w, h);
+    const dataAlpha = imgAlpha.data;
 
     for (let i = 0; i < data.length; i += 4) {
       const a = data[i + 3];
@@ -222,95 +226,110 @@ const makePrintedPhoto = (
       let g = data[i + 1];
       let b = data[i + 2];
 
-      // Slight desaturation to match the "faded print" look
-      const gray = (r + g + b) / 3;
-      r = r * (1 - desat) + gray * desat;
-      g = g * (1 - desat) + gray * desat;
-      b = b * (1 - desat) + gray * desat;
+      // --- Color Processing (Vivid) ---
+      const sat = 1.6; // Increased saturation for "more color"
+      const gray = 0.299 * r + 0.587 * g + 0.114 * b;
+      r = gray + (r - gray) * sat;
+      g = gray + (g - gray) * sat;
+      b = gray + (b - gray) * sat;
+
+      // Add noise
+      const n = (rand01() - 0.5) * noiseAmp;
+      r += n;
+      g += n;
+      b += n;
 
       // Contrast & Brightness
       r = applyContrast(r) + brightness;
       g = applyContrast(g) + brightness;
       b = applyContrast(b) + brightness;
+      
+      // Clamp
+      r = Math.max(0, Math.min(255, r));
+      g = Math.max(0, Math.min(255, g));
+      b = Math.max(0, Math.min(255, b));
 
-      // Clamp values
-      data[i] = Math.max(0, Math.min(255, r));
-      data[i + 1] = Math.max(0, Math.min(255, g));
-      data[i + 2] = Math.max(0, Math.min(255, b));
+      // Luma Key for Background Removal ("fuera del fondo")
+      // We use a soft transition to avoid jagged edges on the face
+      const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+      const bgThreshold = 235; 
+      const fadeRange = 20;
+
+      let newAlpha = a;
+      if (lum > bgThreshold) {
+          newAlpha = 0; // Pure white background removed
+      } else if (lum > bgThreshold - fadeRange) {
+          // Soft fade for edge pixels
+          const ratio = (lum - (bgThreshold - fadeRange)) / fadeRange;
+          newAlpha = a * (1 - ratio);
+      }
+
+      dataAlpha[i] = r;
+      dataAlpha[i+1] = g;
+      dataAlpha[i+2] = b;
+      dataAlpha[i+3] = newAlpha;
     }
-    ctx.putImageData(img, 0, 0);
 
     if (opts.dots) {
-      const layer = document.createElement("canvas");
-      layer.width = w;
-      layer.height = h;
-      const lctx = layer.getContext("2d", { willReadFrequently: true });
-      if (lctx) {
-        const pattern = lctx.createPattern(opts.dots, "repeat");
+      // "Text-Formed" Ghost Photo:
+      // Clip the processed Face (imgAlpha) to the Text Pattern (dots)
+      const tempCanvas = document.createElement("canvas");
+      tempCanvas.width = w;
+      tempCanvas.height = h;
+      const tctx = tempCanvas.getContext("2d");
+      
+      if (tctx) {
+        // 1. Draw Text Pattern (The Shape)
+        const pattern = tctx.createPattern(opts.dots, "repeat");
         if (pattern) {
-          lctx.fillStyle = pattern;
-          lctx.fillRect(0, 0, w, h);
+          tctx.fillStyle = pattern;
+          tctx.fillRect(0, 0, w, h);
+          
+          // 2. Composite Face (The Color) using source-in
+          // Keeps Face pixels ONLY where Text is opaque.
+          tctx.globalCompositeOperation = "source-in";
+          
+          const faceCanvas = document.createElement("canvas");
+          faceCanvas.width = w;
+          faceCanvas.height = h;
+          faceCanvas.getContext("2d")?.putImageData(imgAlpha, 0, 0);
+          
+          tctx.drawImage(faceCanvas, 0, 0);
 
-          const mask = document.createElement("canvas");
-          mask.width = w;
-          mask.height = h;
-          const mctx = mask.getContext("2d");
-          if (mctx) {
-            const cx = w / 2;
-            const cy = h / 2;
-            const radius = Math.max(w, h) * 0.8;
-            const g = mctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
-            // Stronger pattern visibility in center for "letras en la cara"
-            g.addColorStop(0, "rgba(0,0,0,0.65)"); 
-            g.addColorStop(1, "rgba(0,0,0,1)");
-            mctx.fillStyle = g;
-            mctx.fillRect(0, 0, w, h);
-
-            lctx.save();
-            lctx.globalCompositeOperation = "destination-in";
-            lctx.drawImage(mask, 0, 0);
-            lctx.restore();
-          }
-
-          ctx.save();
-          // Multiply to embed text into the photo structure
-          ctx.globalCompositeOperation = "multiply"; 
-          ctx.globalAlpha = 0.75; // Strong visibility for text
-          ctx.drawImage(layer, 0, 0);
-          ctx.restore();
+          // 3. Composite Face AGAIN using "multiply" with low opacity
+          // This fills in the gaps slightly so it's not JUST text, making it more readable and colored
+          // as requested "dejarlo con color"
+          tctx.globalCompositeOperation = "destination-over";
+          tctx.globalAlpha = 0.75; // Increased opacity for more visible color
+          tctx.drawImage(faceCanvas, 0, 0);
+          tctx.globalAlpha = 1.0;
+          
+          // Replace main canvas
+          ctx.clearRect(0, 0, w, h);
+          ctx.drawImage(tempCanvas, 0, 0);
         }
       }
+    } else {
+        ctx.putImageData(imgAlpha, 0, 0);
     }
   } else {
     // 3. Process Main Photo (Noise & Grading)
-    // Stronger "print" look for main photo
-    const desat = 0.25; // Increased desaturation
-    const contrast = 1.15;
-    const brightness = 5;
-    const noiseAmp = 35; // Increased noise for "pixelated" grain
-    
-    // Pixelation Step: Downscale and Upscale
-    const pixelScale = 0.6; // 60% resolution
-    const smallW = Math.floor(w * pixelScale);
-    const smallH = Math.floor(h * pixelScale);
-    const smallC = document.createElement("canvas");
-    smallC.width = smallW;
-    smallC.height = smallH;
-    const sctx = smallC.getContext("2d");
-    if (sctx) {
-        sctx.drawImage(out, 0, 0, w, h, 0, 0, smallW, smallH);
-        ctx.imageSmoothingEnabled = false;
-        ctx.drawImage(smallC, 0, 0, smallW, smallH, 0, 0, w, h);
-    }
+    // Refined "Dye-Sublimation" look: Continuous tone but with significant film/plastic grain
+    const desat = 0.02; // Less desaturation for more vividness
+    const contrast = 1.08; // Slightly more punch
+    const brightness = 10; // Slightly less brightness wash
+    const noiseAmp = 65; // Significantly increased for "granizado"
     
     const applyContrast = (v: number) => (v - 128) * contrast + 128;
 
-    // Refresh data after pixelation
+    // Refresh data
     const pixelatedData = ctx.getImageData(0, 0, w, h);
     data = pixelatedData.data;
 
+    const fadeStart = h * 0.85; // Start fading at 85% of height
+
     for (let i = 0; i < data.length; i += 4) {
-      const a = data[i + 3];
+      let a = data[i + 3];
       if (a === 0) continue;
 
       let r = data[i];
@@ -323,9 +342,10 @@ const makePrintedPhoto = (
       g = g * (1 - desat) + gray * desat;
       b = b * (1 - desat) + gray * desat;
 
-      // Color grading (warm shift)
+      // Color grading (Warm/Greenish shift typical of ID printers)
+      // Enhanced for realism: slightly more yellow/green tint
       r = r * 1.02;
-      g = g * 0.99;
+      g = g * 1.03; 
       b = b * 0.96;
 
       // Contrast & Brightness
@@ -333,7 +353,14 @@ const makePrintedPhoto = (
       g = applyContrast(g) + brightness;
       b = applyContrast(b) + brightness;
 
-      // CMY Noise (colored noise looks more like print)
+      // Lift Blacks (Simulate print on plastic - no pure black)
+      // Map 0 -> 25 (Increased to simulate reflective surface)
+      r = Math.max(25, r);
+      g = Math.max(25, g);
+      b = Math.max(25, b);
+
+      // CMY Noise (Dye-Sublimation grain) - Heavy Grain
+      // We use independent noise for channels to simulate dye diffusion
       const nr = (rand01() - 0.5) * noiseAmp;
       const ng = (rand01() - 0.5) * noiseAmp;
       const nb = (rand01() - 0.5) * noiseAmp;
@@ -342,29 +369,55 @@ const makePrintedPhoto = (
       g += ng;
       b += nb;
 
+      // Bottom Fade ("Desvanecido") & Real Edges
+      const y = Math.floor((i / 4) / w);
+      if (y > fadeStart) {
+          const ratio = (y - fadeStart) / (h - fadeStart);
+          // Soft quadratic fade
+          const alphaFactor = 1 - (ratio * ratio);
+          a = a * alphaFactor;
+      }
+
       data[i] = Math.max(0, Math.min(255, r));
       data[i + 1] = Math.max(0, Math.min(255, g));
       data[i + 2] = Math.max(0, Math.min(255, b));
+      data[i + 3] = a;
     }
     ctx.putImageData(pixelatedData, 0, 0);
     
-    // 4. Main Photo Micro-Grid (Simulate Dye-Sublimation Structure)
-    // Replaced lines with a dot grid for "pixelated" tint
+    // 4. Surface Texture (Plastic Sheen/Roughness)
+    // Stronger "bump map" noise for "acabado realista"
     ctx.save();
-    ctx.globalCompositeOperation = "multiply";
-    ctx.globalAlpha = 0.15;
-    ctx.fillStyle = "rgba(0,0,0,0.8)";
+    ctx.globalCompositeOperation = "overlay";
+    ctx.globalAlpha = 0.15; // Increased opacity for texture visibility
     
-    // Dot grid pattern
-    const dotGap = 2;
-    for(let y = 0; y < h; y += dotGap) {
-        for(let x = 0; x < w; x += dotGap) {
-             if ((x/dotGap + y/dotGap) % 2 === 0) {
-                 ctx.fillRect(x, y, 1, 1);
-             }
+    const surface = document.createElement("canvas");
+    surface.width = w;
+    surface.height = h;
+    const sctx = surface.getContext("2d");
+    if (sctx) {
+        const sImg = sctx.createImageData(w, h);
+        for(let i=0; i<sImg.data.length; i+=4) {
+            const val = (rand01() * 255)|0;
+            sImg.data[i] = val;
+            sImg.data[i+1] = val;
+            sImg.data[i+2] = val;
+            sImg.data[i+3] = 255;
         }
+        sctx.putImageData(sImg, 0, 0);
+        ctx.drawImage(surface, 0, 0);
     }
     ctx.restore();
+
+    // 5. Final Alpha Clip
+    // Ensure we don't have any noise spilling into transparent areas
+    ctx.save();
+    ctx.globalCompositeOperation = "destination-in";
+    ctx.drawImage(tmp, 0, 0, w, h);
+    ctx.restore();
+
+
+
   }
 
   // 5. Apply External Textures (if any)
@@ -518,10 +571,52 @@ const initialPositions: Record<string, Position> = {
 
   // Signatures and Back
   firma: { x: 380, y: 292 },
-  ocr: { x: 50, y: 450 },
-  cic: { x: 500, y: 150 },
-  identificador: { x: 500, y: 180 },
-  huella: { x: 50, y: 150 },
+  ocr: { x: 50, y: 378 }, // Moved up for bottom margin, centered x
+  cic: { x: 480, y: 80 },
+  identificador: { x: 480, y: 100 },
+  huella: { x: 480, y: 140 }, // Moved to right side standard position
+};
+
+const generateRandomTextPattern = (
+  seed: number,
+  width: number = 200,
+  height: number = 200,
+  text?: string
+) => {
+  if (typeof window === "undefined") return null;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return canvas;
+
+  ctx.fillStyle = "#000000"; 
+  ctx.font = "bold 5px Arial Narrow"; 
+  ctx.textBaseline = "top";
+
+  const rng = createSeededRng(seed);
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  const sourceText = text || "";
+  
+  let y = 0;
+  const lineHeight = 5;
+  
+  while (y < height) {
+      let line = "";
+      while (ctx.measureText(line).width < width * 1.5) {
+          if (sourceText) {
+             line += sourceText + " ";
+          } else {
+             line += chars[Math.floor(rng() * chars.length)];
+          }
+      }
+      // Alternate offset for better coverage
+      const offset = (y % (lineHeight * 2)) === 0 ? -20 : -10;
+      ctx.fillText(line, offset, y);
+      y += lineHeight; 
+  }
+  
+  return canvas;
 };
 
 const IneCanvas = ({
@@ -539,6 +634,8 @@ const IneCanvas = ({
   activeSide,
   stageRef,
   showWatermark,
+  textPatternCanvas,
+  photoScales,
 }: {
   data: IneData;
   templateImage: HTMLImageElement | undefined;
@@ -554,6 +651,8 @@ const IneCanvas = ({
   activeSide: 'front' | 'back';
   stageRef: React.RefObject<KonvaStage | null>;
   showWatermark: boolean;
+  textPatternCanvas: HTMLCanvasElement | null;
+  photoScales: { main: number; ghost: number };
 }) => {
   const [userPhoto] = useImage(data.foto || "");
   const [signatureImage] = useImage(data.firma || "");
@@ -564,6 +663,19 @@ const IneCanvas = ({
     if (!userPhoto) return null;
     return maybeRemoveWhiteBackground(userPhoto);
   }, [userPhoto]);
+
+  const microTextPattern = useMemo(() => {
+    const parts = [
+        data.nombre,
+        data.apellidoPaterno,
+        data.apellidoMaterno,
+        data.curp
+    ].filter(Boolean);
+    let s = parts.join(" ").toUpperCase();
+    if (s.length < 5) s = "INSTITUTO NACIONAL ELECTORAL";
+    
+    return generateRandomTextPattern(12345, 200, 200, s);
+  }, [data.nombre, data.apellidoPaterno, data.apellidoMaterno, data.curp]);
 
   const width = templateImage?.width ?? 0;
   const height = templateImage?.height ?? 0;
@@ -754,60 +866,25 @@ const IneCanvas = ({
   }, []);
 
 
-  const textPatternCanvas = useMemo(() => {
-    if (typeof window === "undefined") return null;
-    const c = document.createElement("canvas");
-    const size = 180;
-    c.width = size;
-    c.height = size;
-    const ctx = c.getContext("2d");
-    if (!ctx) return null;
-
-    ctx.clearRect(0, 0, size, size);
-    
-    // Rotate for security pattern
-    ctx.save();
-    ctx.translate(size/2, size/2);
-    ctx.rotate(-Math.PI / 8); 
-    ctx.translate(-size/2, -size/2);
-
-    ctx.font = "900 11px Arial";
-    ctx.fillStyle = "rgba(0,0,0,0.65)";
-    
-    const text = "INE";
-    const gap = 35;
-    const lineHeight = 14;
-    
-    for (let y = -size; y < size * 2; y += lineHeight) {
-        const offset = ((y / lineHeight) % 2) * (gap / 2);
-        for (let x = -size; x < size * 2; x += gap) {
-            ctx.fillText(text, x + offset, y);
-        }
-    }
-    ctx.restore();
-    
-    return c;
-  }, []);
-
   const printedUserPhotoMain = useMemo(() => {
     if (!processedUserPhoto) return null;
     return makePrintedPhoto(processedUserPhoto, {
       variant: "main",
-      texture: textureCanvas,
-      dots: dotCanvas,
+      texture: null, // Removed texture to avoid "rayado de fondo"
+      dots: null, // Removed external dots to clean up the face
       seed: 24680,
     });
-  }, [processedUserPhoto, textureCanvas, dotCanvas]);
+  }, [processedUserPhoto]);
 
   const printedUserPhotoSmall = useMemo(() => {
     if (!processedUserPhoto) return null;
     return makePrintedPhoto(processedUserPhoto, {
       variant: "small",
-      texture: textureCanvas,
-      dots: textPatternCanvas, // Use the new text pattern
+      texture: null,
+      dots: microTextPattern, // Use the new random/data text pattern
       seed: 13579,
     });
-  }, [processedUserPhoto, textureCanvas, textPatternCanvas]);
+  }, [processedUserPhoto, microTextPattern]);
 
   const clipRoundRect = (
     ctx: KonvaContext,
@@ -859,17 +936,24 @@ const IneCanvas = ({
     shadowBlurBase?: number,
     shadowOpacity?: number
   ) => {
-    const baseFontSize = isLabel ? 7.4 : fontSize;
+    const baseFontSize = isLabel ? 7.2 : fontSize;
     const finalFontSize = baseFontSize * scale;
     const finalLineHeight = isLabel ? 1 : lineHeight ?? 0.95;
     const finalFontFamily = fontFamily || FONT_FAMILY;
     const fontStyle = isLabel ? "normal" : forceBold ? "bold" : "normal";
-    const textColor = fill ?? (isLabel ? "#5A5A5A" : "#2A2A2A");
-    const textOpacity = opacity ?? (isLabel ? 1 : 0.92);
-    const shadowBlur = (shadowBlurBase ?? (isLabel ? 0 : 0.55)) * scale;
-    const shadowOp = shadowOpacity ?? (isLabel ? 0 : 0.22);
+    
+    // Darker, more "ink-like" colors (Dark Grey instead of black for realism)
+    const textColor = fill ?? (isLabel ? "#222222" : "#181818");
+    
+    // Slight opacity reduction and blending for printed look
+    const textOpacity = opacity ?? (isLabel ? 0.9 : 0.88);
+    
+    // "Ink Bleed" simulation via shadow
+    const shadowBlur = (shadowBlurBase ?? (isLabel ? 0.2 : 0.6)) * scale;
+    const shadowOp = shadowOpacity ?? (isLabel ? 0.15 : 0.35);
+    
     const effectiveLetterSpacingBase =
-      letterSpacing ?? (isLabel ? 0 : finalFontFamily.includes("Courier") ? 0 : -0.15);
+      letterSpacing ?? (isLabel ? 0.05 : finalFontFamily.includes("Courier") ? 0 : -0.2);
 
     const basePos = { x: positions[key].x, y: positions[key].y };
     const mappedPos = perspectiveEnabled
@@ -923,11 +1007,11 @@ const IneCanvas = ({
           width={width ? width * scale : undefined}
           lineHeight={finalLineHeight}
           letterSpacing={effectiveLetterSpacingBase * scale}
-          rotation={perspectiveEnabled ? cardRotationDeg : 0}
-          shadowColor="#000000"
+          shadowColor={textColor}
           shadowBlur={shadowBlur}
           shadowOpacity={shadowOp}
-          shadowOffset={{ x: 0.35 * scale, y: 0.35 * scale }}
+          shadowOffset={{ x: 0, y: 0 }}
+          rotation={perspectiveEnabled ? cardRotationDeg : 0}
           draggable={isEditing}
           onDragEnd={handleDragEnd(key)}
           globalCompositeOperation="multiply"
@@ -1054,9 +1138,9 @@ const IneCanvas = ({
               const mapped = perspectiveEnabled
                 ? applyHomography(baseToImage, basePos)
                 : { x: basePos.x * scale, y: basePos.y * scale };
-              const w = 130 * scale;
-              const h = 170 * scale;
-              const r = 6 * scale;
+              const w = 130 * scale * photoScales.main;
+              const h = 170 * scale * photoScales.main;
+              const r = 6 * scale * photoScales.main;
 
               return (
                 <Group
@@ -1078,8 +1162,8 @@ const IneCanvas = ({
               const mapped = perspectiveEnabled
                 ? applyHomography(baseToImage, basePos)
                 : { x: basePos.x * scale, y: basePos.y * scale };
-              const w = 55 * scale;
-              const h = (55 * (170 / 130)) * scale;
+              const w = 55 * scale * photoScales.ghost;
+              const h = (55 * (170 / 130)) * scale * photoScales.ghost;
               return (
                 <Group
                   x={mapped.x}
@@ -1087,9 +1171,23 @@ const IneCanvas = ({
                   rotation={perspectiveEnabled ? cardRotationDeg : 0}
                   draggable={isEditing}
                   onDragEnd={handleDragEnd("ghostFoto")}
-                  clipFunc={(ctx) => clipRoundRect(ctx, 0, 0, w, h, 2 * scale)}
                 >
-                  <KonvaImage image={printedUserPhotoSmall} x={0} y={0} width={w} height={h} opacity={0.95} globalCompositeOperation="multiply" />
+                  {/* The Ghost Photo (Integrated Pattern) */}
+                  {/* Now the pattern is "burned" into the image itself, so we just render the image */}
+                  <KonvaImage 
+                      image={printedUserPhotoSmall} 
+                      x={0} y={0} 
+                      width={w} height={h} 
+                      opacity={0.95} 
+                      // Use 'source-over' or 'multiply'? 
+                      // Since the background is transparent, 'source-over' keeps the white lines visible!
+                      // But 'multiply' helps it blend with the card texture.
+                      // However, the user wants "white lines" visible ("agrabado").
+                      // If we use multiply, white becomes transparent.
+                      // So we must use 'normal' (source-over) to keep the white/light text visible against the card.
+                      globalCompositeOperation="source-over" 
+                      cornerRadius={6 * scale * photoScales.ghost}
+                  />
                 </Group>
               );
             })()}
@@ -1202,7 +1300,7 @@ const IneCanvas = ({
                 {renderField("identificador", data.identificador || '', 12)}
 
                 {/* OCR */}
-                {renderField("ocr", data.ocr || '', 16, 600, 1, "Courier New")}
+                {renderField("ocr", data.ocr || '', 17, 560, 1.05, '"OCR-B", "Courier New", monospace', false, 7.5, true, "#1a1a1a", 0.88, 0.8, 0.45)}
             </>
         )}
         
@@ -1261,6 +1359,48 @@ export default function IneEditor() {
     setOpenSections(prev => ({ ...prev, [section]: !prev[section] }));
   };
 
+  const textPatternCanvas = useMemo(() => {
+    if (typeof window === "undefined") return null;
+    const c = document.createElement("canvas");
+    const size = 180;
+    c.width = size;
+    c.height = size;
+    const ctx = c.getContext("2d");
+    if (!ctx) return null;
+
+    ctx.clearRect(0, 0, size, size);
+    
+    // 1. Rayados Blancos (Fine Lines) - "Rayados" background
+    // Corrected to be HORIZONTAL straight lines as per user request
+    ctx.beginPath();
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.4)";
+    ctx.lineWidth = 0.5;
+    const lineStep = 3; 
+    for (let y = 0; y < size; y += lineStep) {
+        ctx.moveTo(0, y);
+        ctx.lineTo(size, y);
+    }
+    ctx.stroke();
+
+    // 2. Letras INE (Text) - Horizontal straight lines
+    ctx.font = "900 7px Arial"; // Slightly smaller for finer detail
+    ctx.fillStyle = "rgba(255,255,255,0.6)"; // More opaque to stand out
+    
+    const text = "INE";
+    const gap = 12;
+    const lineHeight = 8;
+    
+    for (let y = 0; y < size; y += lineHeight) {
+        // Staggered grid
+        const offset = ((y / lineHeight) % 2) * (gap / 2);
+        for (let x = -gap; x < size; x += gap) {
+            ctx.fillText(text, x + offset, y);
+        }
+    }
+    
+    return c;
+  }, []);
+
   const fullCorners: CardCorners = useMemo(
     () => [
       { x: 0, y: 0 },
@@ -1273,18 +1413,31 @@ export default function IneEditor() {
 
   const refCorners: CardCorners = useMemo(
     () => [
-      { x: 290 / 1280, y: (160 + 28) / 720 },
-      { x: 1050 / 1280, y: (135 + 28) / 720 },
-      { x: 1065 / 1280, y: (590 + 28) / 720 },
-      { x: 275 / 1280, y: (610 + 28) / 720 },
+      { x: 280 / 1280, y: (150 + 28) / 720 },
+      { x: 1060 / 1280, y: (125 + 28) / 720 },
+      { x: 1075 / 1280, y: (600 + 28) / 720 },
+      { x: 265 / 1280, y: (620 + 28) / 720 },
+    ],
+    []
+  );
+
+  // Approximate corners for the back photo (table background)
+  // Expanded to cover more area as per user request ("se vea completo")
+  const backRefCorners: CardCorners = useMemo(
+    () => [
+      { x: 0.08, y: 0.20 },
+      { x: 0.92, y: 0.20 },
+      { x: 0.92, y: 0.80 },
+      { x: 0.08, y: 0.80 },
     ],
     []
   );
 
   const [frontCardCorners, setFrontCardCorners] = useState<CardCorners>(fullCorners);
-  const [backCardCorners, setBackCardCorners] = useState<CardCorners>(fullCorners);
+  const [backCardCorners, setBackCardCorners] = useState<CardCorners>(backRefCorners);
   
   const [activeSide, setActiveSide] = useState<'front' | 'back'>('front');
+  const [photoScales, setPhotoScales] = useState({ main: 1, ghost: 1 });
   const [frontTemplateSrc, setFrontTemplateSrc] = useState(FRONT_TEMPLATE);
   const [backTemplateSrc, setBackTemplateSrc] = useState(BACK_TEMPLATE);
   
@@ -1357,7 +1510,7 @@ export default function IneEditor() {
             setFrontCardCorners(fullCorners);
         } else {
             setBackTemplateSrc(reader.result as string);
-            setBackCardCorners(fullCorners);
+            setBackCardCorners(backRefCorners);
         }
       };
       reader.readAsDataURL(file);
@@ -1506,6 +1659,36 @@ export default function IneEditor() {
                                         </div>
                                         Cambiar Foto
                                     </label>
+                                    <div className="mt-3">
+                                        <div className="flex justify-between items-center mb-1">
+                                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Escala Principal</label>
+                                            <span className="text-[10px] text-slate-400">{photoScales.main.toFixed(2)}x</span>
+                                        </div>
+                                        <input
+                                            type="range"
+                                            min="0.5"
+                                            max="2"
+                                            step="0.05"
+                                            value={photoScales.main}
+                                            onChange={(e) => setPhotoScales(prev => ({ ...prev, main: parseFloat(e.target.value) }))}
+                                            className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                                        />
+                                    </div>
+                                    <div className="mt-3">
+                                        <div className="flex justify-between items-center mb-1">
+                                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Escala Fantasma</label>
+                                            <span className="text-[10px] text-slate-400">{photoScales.ghost.toFixed(2)}x</span>
+                                        </div>
+                                        <input
+                                            type="range"
+                                            min="0.5"
+                                            max="2"
+                                            step="0.05"
+                                            value={photoScales.ghost}
+                                            onChange={(e) => setPhotoScales(prev => ({ ...prev, ghost: parseFloat(e.target.value) }))}
+                                            className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                                        />
+                                    </div>
                                 </div>
                                 <div>
                                     <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 block">Firma</label>
@@ -1741,7 +1924,7 @@ export default function IneEditor() {
                     transformOrigin: 'center center',
                     transition: 'transform 0.3s cubic-bezier(0.4, 0, 0.2, 1)' 
                 }} 
-                className="relative shadow-2xl rounded-lg overflow-hidden ring-1 ring-slate-700/50"
+                className="relative shadow-2xl rounded-lg ring-1 ring-slate-700/50"
             >
                 <IneCanvas 
                     data={data} 
@@ -1758,6 +1941,8 @@ export default function IneEditor() {
                     activeSide={activeSide}
                     stageRef={stageRef}
                     showWatermark={showWatermark}
+                    textPatternCanvas={textPatternCanvas}
+                    photoScales={photoScales}
                 />
             </div>
          </div>
